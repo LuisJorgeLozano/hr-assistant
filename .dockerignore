@@ -1,0 +1,25 @@
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Pruebas y documentación: no van en la imagen
+tests/
+e2e/
+doc/
+scripts/
+
+# Cachés y entornos
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.pylint.d/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Control de versiones y CI
+.git/
+.github/
