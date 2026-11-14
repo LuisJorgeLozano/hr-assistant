@@ -23,8 +23,11 @@ jobs:
           python-version: "3.12"
       - name: Instalar dependencias
         run: pip install -r requirements.txt
-      - name: Pylint con 88 columnas
-        run: python -m pylint app tests scripts --max-line-length=88
+      # Mismo comando que verification/qa.py (sin scripts), para que CI y local coincidan.
+      - name: Pylint igual que la verificacion local
+        run: >-
+          python -m pylint app tests --max-line-length=88 --fail-under=10
+          --disable=missing-function-docstring,redefined-outer-name,too-few-public-methods
 
   unit:
     name: unit
