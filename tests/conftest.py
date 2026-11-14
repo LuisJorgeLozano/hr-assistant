@@ -91,8 +91,8 @@ from app.llm import Completion, FakeModel
 from app.main import create_app
 from app.observability import JsonLogger
 
-EMPLOYEES_FILE = Path(__file__).resolve().parents[2] / "spec" / "employees.json"
-PRICES_FILE = Path(__file__).resolve().parents[2] / "spec" / "model_prices.json"
+EMPLOYEES_FILE = Path(__file__).resolve().parents[1] / "data" / "employees.json"
+PRICES_FILE = Path(__file__).resolve().parents[1] / "data" / "model_prices.json"
 DEPARTMENTS = ["Tecnología", "Ventas", "Finanzas"]
 SMALL = "@cf/meta/llama-3.1-8b-instruct-fast"
 LARGE = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
