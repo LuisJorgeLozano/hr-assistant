@@ -51,12 +51,12 @@ docker run --rm -p 8000:8000 --env-file .env hr-assistant
 3. En **Environment** escribe los secretos: `API_KEYS`, `CF_ACCOUNT_ID`, `CF_GATEWAY_ID`, `CF_API_TOKEN` y, para
    trazas, `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY` y `LANGSMITH_PROJECT`.
 4. Render publica solo si el CI pasa y `/health` responde. Comprueba con
-   `SMOKE_API_KEY=<clave> python scripts/smoke.py https://<servicio>.onrender.com`.
+   `SMOKE_API_KEY=<clave> python scripts/smoke.py https://hr-assistant-02cw.onrender.com`.
 
 ## Concurrencia y prueba de carga
 
 ```bash
-LOAD_API_KEY=<clave> python scripts/load_test.py https://<servicio>.onrender.com \
+LOAD_API_KEY=<clave> python scripts/load_test.py https://hr-assistant-02cw.onrender.com \
   --requests 20 --concurrency 10
 ```
 

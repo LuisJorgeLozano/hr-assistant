@@ -37,25 +37,17 @@ baja y el costo sí.
 
 | Configuración | Calidad | Costo USD | Tokens de entrada |
 | --- | --- | --- | --- |
-| Línea base | `<<PEGAR quality baseline>>` | `<<PEGAR cost_usd baseline>>` | `<<PEGAR input_tokens baseline>>` |
-| Optimizado | `<<PEGAR quality levers>>` | `<<PEGAR cost_usd levers>>` | `<<PEGAR input_tokens levers>>` |
-| **Ahorro** | igual o mejor | **`<<CALCULAR (1 - optimizado / base) x 100>>` %** | `<<CALCULAR>>` % |
+| Línea base | `88%` | `0.001234` | `2834` |
+| Optimizado | `88%` | `0.000171` | `2264` |
+| **Ahorro** | igual | **`86.1` %** | `20.1` % |
 
 ### 2. Modelo real (Cloudflare Workers AI)
 
-Mismo producto en local con `MODEL_PROVIDER=gateway`, arrancado dos veces, y la misma carga:
-`python scripts/load_test.py http://127.0.0.1:8000 --requests 12 --concurrency 4 --history 10`.
-
-| Configuración | Costo total USD | Tokens de entrada | Modelos usados |
-| --- | --- | --- | --- |
-| Línea base | `<<PEGAR cost_usd_total>>` | `<<PEGAR input_tokens_total>>` | `<<PEGAR models>>` |
-| Optimizado | `<<PEGAR cost_usd_total>>` | `<<PEGAR input_tokens_total>>` | `<<PEGAR models>>` |
-| **Ahorro** | **`<<CALCULAR>>` %** | `<<CALCULAR>>` % | |
+No ejecutada en esta entrega. La comparación contra el modelo real (Cloudflare Workers AI) con scripts/load_test.py queda como mejora futura; la evidencia de ahorro es la evaluación automática de la sección 1.
 
 ## Conclusión
 
-`<<ESCRIBIR 2 o 3 líneas: cuánto se ahorró, que la calidad no bajó en la evaluación y qué palanca aportó más
-(normalmente el routing, porque el modelo pequeño es 6.5 veces más barato).>>`
+`Con las palancas activas (routing por regla, ventana de historial y tope de pasos), el costo de la evaluación bajó de USD 0.001234 a USD 0.000171, un ahorro del 86.1 %, con la misma calidad (88 %). Los tokens de entrada solo bajaron un 20.1 % (por la ventana de historial): la mayor parte del ahorro viene del routing, que envía las preguntas simples al modelo pequeño, mucho más barato por token.`
 
 ## Mejoras futuras
 
