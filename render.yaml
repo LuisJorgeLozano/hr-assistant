@@ -16,6 +16,11 @@ services:
         value: "true"
       - key: HIDE_OUTPUTS
         value: "true"
+      # Trazas: sin LANGSMITH_API_KEY (se escribe en Render > Environment) no se conecta.
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_PROJECT
+        value: hr-assistant
       # Secretos: se escriben en Render, nunca en el repositorio.
       - key: API_KEYS
         sync: false

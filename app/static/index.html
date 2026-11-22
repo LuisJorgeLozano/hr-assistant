@@ -84,6 +84,10 @@
           addLine('error', 'Demasiadas preguntas; espera ' + seconds + ' segundos');
           return;
         }
+        if (response.status === 400) {
+          addLine('error', 'La pregunta fue bloqueada por la política de seguridad.');
+          return;
+        }
         if (!response.ok) {
           addLine('error', 'No se pudo procesar la pregunta. Revisa su largo e '
             + 'inténtalo de nuevo.');
@@ -93,6 +97,9 @@
         addLine('assistant', data.answer);
         const tools = data.tools_used.length ? data.tools_used.join(', ') : 'ninguna';
         addLine('tools', 'Herramientas usadas: ' + tools);
+        if (data.pii_redacted && data.pii_redacted.length) {
+          addLine('tools', 'Datos sensibles ocultados: ' + data.pii_redacted.join(', '));
+        }
         showRequestId(data.request_id);
         history.push({ role: 'user', content: question });
         history.push({ role: 'assistant', content: data.answer });

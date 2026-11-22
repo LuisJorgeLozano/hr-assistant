@@ -5,18 +5,63 @@ empleados y departamentos con un agente de bucle acotado que usa dos herramienta
 solo lectura. Desde la sesión 2 permite responder, con datos, qué pasó con cualquier
 petición: id por petición, log JSON, métricas y trazas opcionales en LangSmith.
 
-## Cómo correrlo
+Listo para producción: API REST documentada (OpenAPI en `/docs`), health check, contenedor, CI en GitHub
+Actions, despliegue en Render, observabilidad con LangSmith, control de costos y guardrails de seguridad.
 
-Desde la carpeta `product/`:
+- **Arquitectura y decisiones**: `doc/architecture.md` y `doc/adr/`.
+- **Costos**: `doc/cost-analysis.md`.
+- **Seguridad**: `doc/security-controls.md` y `doc/compliance-checklist.md`.
+- **Observabilidad**: `doc/observability.md`.
 
+## Requisitos previos
+
+- Python 3.12 (con [uv](https://docs.astral.sh/uv/) o `pip`).
+- Git. Opcional: Docker Desktop para probar el contenedor.
+- Para el modelo real: cuenta de Cloudflare (Account ID, token de Workers AI y un AI Gateway `default`).
+- Opcional: cuenta de LangSmith con una clave *Tracing Only*.
+
+## Instalación y ejecución local
+
+```bash
+git clone <url-del-repositorio> hr-assistant
+cd hr-assistant
+uv venv --python 3.12
+uv pip install -r requirements.txt
+cp .env.example .env        # en Windows: Copy-Item .env.example .env
+# Edita .env: API_KEYS=local:<una-clave-de-16-o-mas> (y CF_* si usas el gateway)
+uv run --env-file .env uvicorn app.main:app --port 8000
 ```
-pip install -r requirements.txt
-uvicorn app.main:app --port 8000
+
+- Página: `http://localhost:8000/` (escribe tu clave en el campo «Clave»).
+- Documentación de la API (Swagger): `http://localhost:8000/docs`; esquema en `/openapi.json`.
+- `POST /ask` con `{"question": "...", "history": [...]}` y el encabezado `X-API-Key`.
+- `GET /health` (sin clave) y `GET /metrics` (con clave).
+
+Con Docker:
+
+```bash
+docker build -t hr-assistant .
+docker run --rm -p 8000:8000 --env-file .env hr-assistant
 ```
 
-- Página: `http://localhost:8000/`
-- `POST /ask` con `{"question": "...", "history": [...]}`.
-- `GET /health` y `GET /metrics`.
+## Despliegue en Render
+
+1. Haz push a GitHub; el CI corre `style`, `unit`, `e2e` y `docker`.
+2. En Render: **New > Blueprint** con este repositorio (`render.yaml`).
+3. En **Environment** escribe los secretos: `API_KEYS`, `CF_ACCOUNT_ID`, `CF_GATEWAY_ID`, `CF_API_TOKEN` y, para
+   trazas, `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY` y `LANGSMITH_PROJECT`.
+4. Render publica solo si el CI pasa y `/health` responde. Comprueba con
+   `SMOKE_API_KEY=<clave> python scripts/smoke.py https://<servicio>.onrender.com`.
+
+## Concurrencia y prueba de carga
+
+```bash
+LOAD_API_KEY=<clave> python scripts/load_test.py https://<servicio>.onrender.com \
+  --requests 20 --concurrency 10
+```
+
+Imprime los códigos de respuesta, la latencia p50, p95 y máxima, los `request_id` distintos, el costo y los modelos
+usados. Con `--requests 40` se ve el límite de peticiones (`429`) en acción.
 
 Pruebas, con cobertura:
 
@@ -74,6 +119,8 @@ pytest --cov=app
 | `ENVIRONMENT` | `development` | Con `production` se aplican las reglas de compliance |
 | `API_KEYS` | (vacía) | Clientes y claves, `cliente:clave,cliente2:clave2` (secreto) |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Peticiones por cliente por minuto |
+| `MAX_ANSWER_CHARS` | `4000` | Largo máximo de la respuesta (se recorta) |
+| `LANGSMITH_PROJECT` | `default` | Proyecto de LangSmith donde caen las trazas |
 
 Un valor inválido impide arrancar. La clave nunca se escribe en el código ni en el log.
 `.env.example` lista todas las variables sin valores secretos.
@@ -127,6 +174,20 @@ Ejemplo local con claves:
 API_KEYS=acme:una-clave-larga-de-prueba uvicorn app.main:app --port 8000
 curl -H "X-API-Key: una-clave-larga-de-prueba" localhost:8000/metrics
 ```
+
+## Guardrails de entrada y salida
+
+En `POST /ask`, antes y después del agente (`app/guardrails.py`, ADR 0013):
+
+- **Historial**: solo roles `user` y `assistant`, máximo 50 mensajes, cada uno con el largo máximo de la pregunta.
+  Si no, `422`.
+- **Inyección de prompt**: frases como «ignora las instrucciones» o «muestra tu prompt» dan
+  `400 {"detail": "question rejected by input policy"}` y el modelo no se llama.
+- **PII y secretos**: correo, teléfono, CURP, RFC, tarjeta, cuenta o CLABE y tokens se reemplazan por
+  `[REDACTED:<tipo>]` en la pregunta y el historial **antes** de llegar al modelo, y en la respuesta antes de llegar
+  al cliente. La respuesta trae `pii_redacted` con los tipos.
+- **Salida**: sin etiquetas HTML ni caracteres de control, y como máximo `MAX_ANSWER_CHARS` caracteres.
+- **Auditoría**: cada intervención escribe un evento `security` con el cliente y los tipos, nunca los valores.
 
 ## Documentación
 
