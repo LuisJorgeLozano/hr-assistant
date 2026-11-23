@@ -3,8 +3,9 @@ import functools
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Callable, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -15,6 +16,12 @@ from app.auth import API_KEY_HEADER, INVALID_KEY_DETAIL, find_client
 from app.compliance import check_compliance
 from app.config import Config, ConfigError, load_config
 from app.directory import Directory
+from app.guardrails import (
+    MAX_HISTORY_MESSAGES,
+    looks_like_injection,
+    redact,
+    sanitize_output,
+)
 from app.llm import ModelUnavailable, create_model
 from app.observability import (
     JsonLogger,
@@ -31,12 +38,17 @@ from app.tracing import traced
 INDEX_FILE = Path(__file__).resolve().parent / "static" / "index.html"
 REQUEST_ID_HEADER = "X-Request-ID"
 VALID_REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+INJECTION_DETAIL = "question rejected by input policy"
 
 
 class HistoryMessage(BaseModel):
-    """Mensaje previo de la conversacion."""
+    """Mensaje previo de la conversacion.
 
-    role: str
+    Solo se aceptan ``user`` y ``assistant``: un cliente no puede colar un
+    mensaje ``system`` para cambiar las instrucciones del agente.
+    """
+
+    role: Literal["user", "assistant"]
     content: str
 
 
@@ -45,6 +57,19 @@ class AskRequest(BaseModel):
 
     question: str
     history: Optional[List[HistoryMessage]] = None
+
+
+@dataclass
+class Services:
+    """Dependencias que necesita ``POST /ask`` para responder."""
+
+    config: Config
+    model: Any
+    directory: Any
+    logger: Any
+    tracer: Callable
+    prices: Any
+    metrics: Metrics
 
 
 def _pick_request_id(candidate: Optional[str]) -> str:
@@ -68,46 +93,42 @@ def _client_field(request: Request) -> dict:
     return {} if client is None else {"client": client}
 
 
-def create_app(  # pylint: disable=too-many-locals
-    config: Optional[Config] = None,
-    model=None,
-    directory=None,
-    clock=None,
-    logger=None,
-):
-    """Crea la aplicacion con sus dependencias.
+def _check_prices(config: Config, prices) -> None:
+    """Exige un precio para cada modelo configurado.
 
-    :param config: configuracion (por omision, la del entorno)
-    :param model: modelo (por omision, segun ``MODEL_PROVIDER``)
-    :param directory: directorio (por omision, el de ``EMPLOYEES_PATH``)
-    :param clock: reloj con ``now()`` (por omision, el del sistema)
-    :param logger: logger JSON (por omision, uno a la salida estandar)
-    :return: la aplicacion FastAPI
+    :param config: configuracion de la aplicacion
+    :param prices: tabla de precios cargada
+    :raises ConfigError: si falta el precio de algun modelo
     """
-    config = config or load_config(os.environ)
-    check_compliance(config)
-    directory = directory or Directory(config.employees_path)
-    prices = load_prices(config.prices_path)
     for name in (config.model_small, config.model_large):
         if not prices.has(name):
             raise ConfigError(f"No price for model {name!r}")
-    model = model or create_model(
-        config.model_provider, directory.departments, config
-    )
-    clock = clock or SystemClock()
-    logger = logger or JsonLogger(config.service_name, clock)
-    metrics = Metrics()
+
+
+def _build_tracer(config: Config) -> Callable:
+    """Arma el trazador segun la configuracion y la clave de LangSmith.
+
+    :param config: configuracion de la aplicacion
+    :return: funcion que envuelve a otra con el trazado
+    """
     tracing_on = config.langsmith_tracing and bool(
         os.environ.get("LANGSMITH_API_KEY")
     )
-    tracer = functools.partial(
+    return functools.partial(
         traced,
         enabled=tracing_on,
         hide_inputs=config.hide_inputs,
         hide_outputs=config.hide_outputs,
     )
-    limiter = RateLimiter(config.rate_limit_per_minute, clock)
-    app = FastAPI(title="HR Assistant")
+
+
+def _make_protected(config: Config, limiter: RateLimiter) -> Callable:
+    """Crea la dependencia que autentica y aplica el limite de peticiones.
+
+    :param config: configuracion con las claves por cliente
+    :param limiter: limitador de peticiones por cliente
+    :return: dependencia de FastAPI que devuelve el nombre del cliente
+    """
 
     def protected(request: Request) -> str:
         """Exige ``X-API-Key`` valida y cuenta la peticion contra el limite.
@@ -128,6 +149,18 @@ def create_app(  # pylint: disable=too-many-locals
                 headers={"Retry-After": str(wait)},
             )
         return client
+
+    return protected
+
+
+def _install_observer(app: FastAPI, clock, logger, metrics: Metrics) -> None:
+    """Registra el middleware que mide la latencia y registra cada peticion.
+
+    :param app: la aplicacion FastAPI
+    :param clock: reloj con ``now()``
+    :param logger: logger JSON
+    :param metrics: metricas del proceso
+    """
 
     @app.middleware("http")
     async def observe(request: Request, call_next):
@@ -163,6 +196,155 @@ def create_app(  # pylint: disable=too-many-locals
         finally:
             request_id_var.reset(token)
 
+
+def _clean_history(messages: List[HistoryMessage], max_chars: int):
+    """Valida el historial y oculta la PII de cada mensaje.
+
+    :param messages: historial que manda el cliente
+    :param max_chars: largo maximo de cada mensaje
+    :return: el historial limpio y los tipos de PII encontrados
+    :raises HTTPException: ``422`` si el historial es demasiado largo
+    """
+    too_many = len(messages) > MAX_HISTORY_MESSAGES
+    too_long = any(len(m.content) > max_chars for m in messages)
+    if too_many or too_long:
+        raise HTTPException(status_code=422, detail="Invalid history")
+    cleaned, found = [], set()
+    for message in messages:
+        content, kinds = redact(message.content)
+        found.update(kinds)
+        cleaned.append({"role": message.role, "content": content})
+    return cleaned, found
+
+
+def _validate_input(body: AskRequest, svc: Services):
+    """Aplica los guardrails de entrada: largo, historial e inyeccion.
+
+    :param body: cuerpo de la peticion
+    :param svc: dependencias de la aplicacion
+    :return: pregunta limpia, historial limpio y tipos de PII encontrados
+    :raises HTTPException: ``422`` por largo o historial; ``400`` por inyeccion
+    """
+    question = body.question
+    if not question.strip() or len(question) > svc.config.max_question_chars:
+        raise HTTPException(status_code=422, detail="Invalid question length")
+    history, input_pii = _clean_history(
+        body.history or [], svc.config.max_question_chars
+    )
+    if looks_like_injection(question):
+        svc.logger.log("security", action="prompt_injection_blocked")
+        raise HTTPException(status_code=400, detail=INJECTION_DETAIL)
+    question, kinds = redact(question)
+    input_pii.update(kinds)
+    return question, history, input_pii
+
+
+def _model_unavailable(svc: Services, error: Exception) -> JSONResponse:
+    """Registra el fallo del modelo y arma la respuesta ``502``.
+
+    :param svc: dependencias de la aplicacion
+    :param error: el error que lanzo el modelo
+    :return: respuesta ``502`` sin detalles internos
+    """
+    svc.logger.log("error", error_type=type(error).__name__)
+    return JSONResponse(
+        status_code=502,
+        content={"detail": "model unavailable", "request_id": request_id_var.get()},
+    )
+
+
+def _build_response(result, answer: str, pii: set) -> dict:
+    """Arma el cuerpo de la respuesta de ``POST /ask``.
+
+    :param result: resultado del agente
+    :param answer: respuesta ya saneada
+    :param pii: tipos de PII ocultados en la entrada y la salida
+    :return: el cuerpo JSON de la respuesta
+    """
+    return {
+        "answer": answer,
+        "steps": result.steps,
+        "tools_used": result.tools_used,
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "request_id": request_id_var.get(),
+        "model": result.model,
+        "route": result.route,
+        "cached_calls": result.cached_calls,
+        "cost_usd": result.cost_usd,
+        "pii_redacted": sorted(pii),
+    }
+
+
+def _answer(body: AskRequest, svc: Services):
+    """Valida la pregunta, corre el agente y arma la respuesta.
+
+    :param body: cuerpo de la peticion
+    :param svc: dependencias de la aplicacion
+    :return: el cuerpo de la respuesta, o una respuesta ``502``
+    """
+    question, history, input_pii = _validate_input(body, svc)
+    agent = Agent(
+        svc.model,
+        svc.directory,
+        svc.config.agent_max_steps,
+        logger=svc.logger,
+        tracer=svc.tracer,
+        config=svc.config,
+        prices=svc.prices,
+    )
+    try:
+        result = agent.run(question, history)
+    except ModelUnavailable as error:
+        return _model_unavailable(svc, error)
+    svc.metrics.add_tokens(result.input_tokens, result.output_tokens)
+    svc.metrics.add_cost(result.cost_usd)
+    answer, output_pii = sanitize_output(result.answer, svc.config.max_answer_chars)
+    if input_pii or output_pii:
+        svc.logger.log(
+            "security",
+            action="pii_redacted",
+            input_types=sorted(input_pii),
+            output_types=output_pii,
+        )
+    return _build_response(result, answer, input_pii.union(output_pii))
+
+
+def create_app(
+    config: Optional[Config] = None,
+    model=None,
+    directory=None,
+    clock=None,
+    logger=None,
+):
+    """Crea la aplicacion con sus dependencias.
+
+    :param config: configuracion (por omision, la del entorno)
+    :param model: modelo (por omision, segun ``MODEL_PROVIDER``)
+    :param directory: directorio (por omision, el de ``EMPLOYEES_PATH``)
+    :param clock: reloj con ``now()`` (por omision, el del sistema)
+    :param logger: logger JSON (por omision, uno a la salida estandar)
+    :return: la aplicacion FastAPI
+    """
+    config = config or load_config(os.environ)
+    check_compliance(config)
+    directory = directory or Directory(config.employees_path)
+    prices = load_prices(config.prices_path)
+    _check_prices(config, prices)
+    model = model or create_model(
+        config.model_provider, directory.departments, config
+    )
+    clock = clock or SystemClock()
+    logger = logger or JsonLogger(config.service_name, clock)
+    metrics = Metrics()
+    svc = Services(
+        config, model, directory, logger, _build_tracer(config), prices, metrics
+    )
+    limiter = RateLimiter(config.rate_limit_per_minute, clock)
+    protected = _make_protected(config, limiter)
+    app = FastAPI(title="HR Assistant")
+    _install_observer(app, clock, logger, metrics)
+
     @app.get("/")
     def home():
         """Sirve la pagina web."""
@@ -183,50 +365,9 @@ def create_app(  # pylint: disable=too-many-locals
         """Responde una pregunta; no guarda nada entre peticiones."""
         token = client_var.set(client)
         try:
-            return _answer(body)
+            return _answer(body, svc)
         finally:
             client_var.reset(token)
-
-    def _answer(body: AskRequest):
-        """Valida la pregunta, corre el agente y arma la respuesta."""
-        question = body.question
-        if not question.strip() or len(question) > config.max_question_chars:
-            raise HTTPException(status_code=422, detail="Invalid question length")
-        history = [m.model_dump() for m in body.history or []]
-        agent = Agent(
-            model,
-            directory,
-            config.agent_max_steps,
-            logger=logger,
-            tracer=tracer,
-            config=config,
-            prices=prices,
-        )
-        try:
-            result = agent.run(question, history)
-        except ModelUnavailable as error:
-            logger.log("error", error_type=type(error).__name__)
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "detail": "model unavailable",
-                    "request_id": request_id_var.get(),
-                },
-            )
-        metrics.add_tokens(result.input_tokens, result.output_tokens)
-        metrics.add_cost(result.cost_usd)
-        return {
-            "answer": result.answer,
-            "steps": result.steps,
-            "tools_used": result.tools_used,
-            "input_tokens": result.input_tokens,
-            "output_tokens": result.output_tokens,
-            "request_id": request_id_var.get(),
-            "model": result.model,
-            "route": result.route,
-            "cached_calls": result.cached_calls,
-            "cost_usd": result.cost_usd,
-        }
 
     return app
 

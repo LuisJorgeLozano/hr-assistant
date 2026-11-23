@@ -31,6 +31,7 @@ class Config:  # pylint: disable=too-many-instance-attributes
     :param environment: ``production`` activa las reglas de compliance
     :param api_keys: mapa de cliente a clave (nunca se muestra en ``repr``)
     :param rate_limit_per_minute: peticiones por cliente por minuto
+    :param max_answer_chars: largo maximo de la respuesta que se devuelve
     """
 
     model_provider: str
@@ -57,6 +58,7 @@ class Config:  # pylint: disable=too-many-instance-attributes
     environment: str = "development"
     api_keys: Dict[str, str] = field(default_factory=dict, repr=False)
     rate_limit_per_minute: int = 30
+    max_answer_chars: int = 4000
 
 
 def parse_api_keys(raw: str) -> Dict[str, str]:
@@ -204,4 +206,5 @@ def load_config(env: Mapping[str, str]) -> Config:
         environment=(env.get("ENVIRONMENT") or "development").strip().lower(),
         api_keys=parse_api_keys(env.get("API_KEYS", "")),
         rate_limit_per_minute=_positive_int(env, "RATE_LIMIT_PER_MINUTE", 30),
+        max_answer_chars=_positive_int(env, "MAX_ANSWER_CHARS", 4000),
     )
