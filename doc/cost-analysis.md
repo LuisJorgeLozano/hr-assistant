@@ -47,7 +47,7 @@ No ejecutada en esta entrega. La comparación contra el modelo real (Cloudflare 
 
 ## Conclusión
 
-`Con las palancas activas (routing por regla, ventana de historial y tope de pasos), el costo de la evaluación bajó de USD 0.001234 a USD 0.000171, un ahorro del 86.1 %, con la misma calidad (88 %). Los tokens de entrada solo bajaron un 20.1 % (por la ventana de historial): la mayor parte del ahorro viene del routing, que envía las preguntas simples al modelo pequeño, mucho más barato por token.`
+Con las palancas activas (routing por regla, ventana de historial y tope de pasos), el costo de la evaluación bajó de USD 0.001234 a USD 0.000171, un ahorro del 86.1 %, con la misma calidad (88 %). Los tokens de entrada solo bajaron un 20.1 % (por la ventana de historial): la mayor parte del ahorro viene del routing, que envía las preguntas simples al modelo pequeño, mucho más barato por token.
 
 ## Mejoras futuras
 
